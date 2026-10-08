@@ -1,0 +1,129 @@
+# Starter CI template: Rust (cheap -> costly). Copy to
+# <public-repo>/.github/workflows/ci.yml and adjust.
+# Each job only runs if the cheaper one before it passed (needs:).
+#
+# Per-project knobs (set under `env` below):
+# - SYSTEM_DEPS: apt packages needed to compile ("" = none). Cached across
+#   runs, so apt-install stops paying full download cost every job.
+# - Rust builds are cached with Swatinem/rust-cache (registry + target).
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SYSTEM_DEPS: ""
+
+jobs:
+  fmt: # seconds: rustfmt check (the Spotless equivalent)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy: # tens of seconds: lint, needs build info
+    needs: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Prepare apt cache dir
+        if: env.SYSTEM_DEPS != ''
+        run: |
+          sudo mkdir -p /var/cache/apt/archives/partial
+          sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
+      - name: Cache apt archives
+        if: env.SYSTEM_DEPS != ''
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
+      - name: Install system deps
+        if: env.SYSTEM_DEPS != ''
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends $SYSTEM_DEPS
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # Static-analysis extras (secrets, deps, licenses) run here, cheap and
+  # parallel-safe once fmt/clippy pass. Uncomment as needed:
+  # audit:
+  #   needs: clippy
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - run: cargo install cargo-audit --locked && cargo audit
+  # deny:
+  #   needs: clippy
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - run: cargo install cargo-deny --locked && cargo deny check
+
+  build: # minutes: compile
+    needs: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Prepare apt cache dir
+        if: env.SYSTEM_DEPS != ''
+        run: |
+          sudo mkdir -p /var/cache/apt/archives/partial
+          sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
+      - name: Cache apt archives
+        if: env.SYSTEM_DEPS != ''
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
+      - name: Install system deps
+        if: env.SYSTEM_DEPS != ''
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends $SYSTEM_DEPS
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --all-features
+
+  test: # most expensive compute: unit + integration tests
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Prepare apt cache dir
+        if: env.SYSTEM_DEPS != ''
+        run: |
+          sudo mkdir -p /var/cache/apt/archives/partial
+          sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
+      - name: Cache apt archives
+        if: env.SYSTEM_DEPS != ''
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
+      - name: Install system deps
+        if: env.SYSTEM_DEPS != ''
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends $SYSTEM_DEPS
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --all-features
+
+  # ai-review: runs only on green code (needs: test). Wire your reviewer
+  # action here (e.g. Claude review). Human review stays last via branch
+  # protection requiring PR approval before merge.
